@@ -71,12 +71,61 @@ def _url_is_from_header(cfg: Config, request: Request) -> bool:
     return cfg.upstream.mode in ("header", "header_required") and _header_base(request) is not None
 
 
+def _strip_responses_suffix(url: str) -> str:
+    """Upstream API base: the responses URL with its trailing '/responses' endpoint
+    removed. 'https://h/v1/responses' -> 'https://h/v1'. A URL not ending in
+    '/responses' is returned unchanged (treated as an already-base URL)."""
+    return url[: -len("/responses")] if url.endswith("/responses") else url
+
+
+def _api_root(listen_path: str) -> str:
+    """The directory containing a listen_path's endpoint: '/v1/responses' -> '/v1'."""
+    return listen_path.rsplit("/", 1)[0] if "/" in listen_path else ""
+
+
+def _resolve_passthrough_url(cfg: Config, request: Request) -> str | None:
+    """Map an arbitrary incoming request to its upstream equivalent for transparent
+    passthrough (everything that is NOT a fold endpoint, e.g. GET /v1/models).
+
+    The proxy serves an OpenAI-style tree: each listen_path is '<root>/<endpoint>'
+    (e.g. '/v1/responses') and the resolved upstream responses URL is '<base>/responses'.
+    A non-fold request is forwarded to '<base>/<suffix>', where <suffix> is the incoming
+    path with the matched listen-path root removed (GET /v1/models -> <base>/models),
+    so an agent can still list models / hit other endpoints through the proxy. Query
+    string is preserved. Returns None only under header_required without the header.
+    """
+    responses_url = _resolve_upstream_url(cfg, request)
+    if responses_url is None:
+        return None
+    base = _strip_responses_suffix(responses_url)
+
+    path = request.url.path
+    # Longest matching listen-path root wins (handles multiple listen_paths).
+    roots = sorted(
+        {_api_root(p) for p in cfg.server.listen_paths if "/" in p},
+        key=len,
+        reverse=True,
+    )
+    suffix = path
+    for root in roots:
+        if root and (path == root or path.startswith(root + "/")):
+            suffix = path[len(root):] or "/"
+            break
+
+    target = base.rstrip("/") + suffix
+    if request.url.query:
+        target += "?" + request.url.query
+    return target
+
+
 async def _passthrough(
-    client: httpx.AsyncClient, cfg: Config, request: Request, raw: bytes, url: str
+    client: httpx.AsyncClient, cfg: Config, request: Request, raw: bytes, url: str,
+    method: str = "POST",
 ):
-    """Pure proxy: forward the raw request and stream the raw response back."""
+    """Pure proxy: forward the raw request and stream the raw response back.
+    `method` defaults to POST (the Responses endpoint); other endpoints pass theirs."""
     headers = build_upstream_headers(request.headers.items(), cfg)
-    resp = await open_passthrough(client, url, raw, headers)
+    resp = await open_passthrough(client, url, raw, headers, method=method)
 
     async def body_iter():
         try:
@@ -190,6 +239,40 @@ async def handle_responses(request: Request) -> Response:
     )
 
 
+async def handle_passthrough(request: Request) -> Response:
+    """Transparent passthrough for any request that is NOT a fold endpoint (e.g.
+    GET /v1/models, POST /v1/embeddings), so an agent can still list models and hit
+    other endpoints through the proxy instead of getting 404. The raw request is
+    forwarded to the upstream equivalent and the response streamed back unchanged.
+    The same credential-leak guard as the fold path applies (never inject configured
+    credentials toward a request-supplied Responses-API-Base URL)."""
+    cfg: Config = request.app.state.cfg
+    client: httpx.AsyncClient = request.app.state.client
+
+    url = _resolve_passthrough_url(cfg, request)
+    if url is None:
+        return JSONResponse(
+            {"error": "Responses-API-Base header is required (upstream mode=header_required)"},
+            status_code=400,
+        )
+
+    if _url_is_from_header(cfg, request) and would_inject_authorization(
+        cfg, agent_has_authorization=request.headers.get("authorization") is not None
+    ):
+        log.warning("blocked passthrough: Responses-API-Base override without own auth (path=%s)",
+                    request.url.path)
+        return JSONResponse(
+            {"error": "When overriding the upstream base (Responses-API-Base), the request must "
+                      "provide its own Authorization; the proxy will not send its configured "
+                      "credentials to an externally supplied URL."},
+            status_code=400,
+        )
+
+    raw = await request.body()
+    log.info("passthrough: %s %s -> %s", request.method, request.url.path, url)
+    return await _passthrough(client, cfg, request, raw, url, method=request.method)
+
+
 def _make_client() -> httpx.AsyncClient:
     """A client that does NOT invent a User-Agent or Accept of its own; those
     are forwarded from the agent or omitted. httpx still manages Host /
@@ -215,4 +298,12 @@ def create_app(cfg: Config) -> Starlette:
     routes = [
         Route(path, handle_responses, methods=["POST"]) for path in cfg.server.listen_paths
     ]
+    # Catch-all transparent passthrough for everything else (GET /v1/models, etc.).
+    # Fold routes are POST-only and listed first, so they win on full match; any other
+    # path/method falls through here and is forwarded to the upstream unchanged.
+    routes.append(Route(
+        "/{path:path}",
+        handle_passthrough,
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    ))
     return Starlette(routes=routes, lifespan=lifespan)

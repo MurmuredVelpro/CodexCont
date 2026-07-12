@@ -54,9 +54,14 @@ async def open_passthrough(
     url: str,
     raw_body: bytes,
     headers: dict[str, str],
+    method: str = "POST",
 ) -> httpx.Response:
-    """Open a streaming upstream request forwarding the raw body unchanged."""
-    req = client.build_request("POST", url, content=raw_body, headers=headers, timeout=None)
+    """Open a streaming upstream request forwarding the raw body unchanged.
+
+    `method` defaults to POST (the Responses endpoint). Transparent passthrough of
+    other endpoints (e.g. GET /v1/models) passes the caller's method through verbatim.
+    """
+    req = client.build_request(method, url, content=raw_body, headers=headers, timeout=None)
     return await client.send(req, stream=True)
 
 
