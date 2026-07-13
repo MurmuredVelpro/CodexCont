@@ -18,6 +18,7 @@
 
 - 实时向下游转发 reasoning 项，保留“正在思考”的体验。
 - 在上游 terminal event 出现前，缓存暂定的最终输出（`message` 和 `function_call`）。
+- 可选在折叠期间发送无副作用的 SSE 心跳事件，避免长时间缓存输出导致下游 idle 超时。
 - 如果本轮被判定为截断，丢弃暂定输出，并携带已产生的 reasoning 打开下一轮续写请求。
 - 如果本轮自然完成或触发安全上限，冲刷最终一轮的输出，并发出一个重构后的 terminal response。
 - 对不符合条件的请求透明透传。
@@ -132,6 +133,15 @@ chatgpt_account_id = ""            # 非空时作为 chatgpt-account-id 发送
 
 下游编码代理只会看到一个 response；隐藏轮次的细节会写入最终响应的 metadata。
 
+心跳注入默认关闭，因为 `response.keep_alive` 是 Codex 兼容扩展，并非公开文档中定义的 Responses API 流式事件。启用后，请求进入折叠逻辑时，代理会定期发送这个无副作用的 SSE 事件。Codex 会先解析该事件（从而重置基于事件的 idle 计时器），再安全地忽略这个未知的 Responses event 类型。心跳特意不带 `sequence_number`，因此不会干扰真实响应事件的序号；即使上游 message 或 function-call delta 正在持续到达但仍被代理缓存，下游流也能保持活跃。需要时可在 `[stream]` 中启用：
+
+```toml
+[stream]
+heartbeat_interval_seconds = 15.0 # 秒；保持为 0 则关闭心跳
+```
+
+透传请求仍保持字节透明，不会注入本地心跳。
+
 ## 响应 metadata
 
 最终重构响应会包含代理相关 metadata，例如：
@@ -156,6 +166,7 @@ uv run python tests/test_middleware.py
 
 - 截断数学判断
 - 增量 SSE 解析
+- 折叠输出被缓存期间的下游 SSE 心跳事件
 - 基于抓包 fixture 的折叠/重写行为
 - commentary 和 tool-pair 两种续写 payload
 - header 透明转发
@@ -185,7 +196,7 @@ config.example.toml # 示例运行配置；复制为 config.toml 后本地使用
 
 ## 限制
 
-- 最终答案文本会被缓存到 terminal round 证明未截断之后才发出，因此最终答案首 token 延迟可能高于普通流式请求。
+- 最终答案文本会被缓存到 terminal round 证明未截断之后才发出，因此最终答案首 token 延迟可能高于普通流式请求。SSE 心跳事件会在此期间保持连接活跃，但不会提前暴露暂定文本。
 - 非流式请求当前会透传，不进行折叠。
 - 截断检测器是针对已观察到的 `518 * n - 2` 指纹设计的。
 - 可选的 `repair_followup = "stateful"` 使用进程内内存状态；多代理实例之间不会共享。

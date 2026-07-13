@@ -20,6 +20,7 @@ This project explicitly bypasses the observed OpenAI Codex reasoning-truncation 
 
 - Streams reasoning items to the agent live.
 - Buffers tentative final output (`message` and `function_call`) until the upstream terminal event reveals whether the round was truncated.
+- Can send optional no-op SSE heartbeat events while folding, preventing downstream idle timeouts during long buffered output.
 - If the round is truncated, discards the tentative output and opens a continuation round with the prior reasoning replayed.
 - If the round finishes cleanly or a safety cap is reached, flushes the final round output and emits one reconstructed terminal response.
 - Leaves non-matching traffic as a transparent passthrough.
@@ -134,6 +135,15 @@ For each upstream round:
 
 The downstream agent sees one response, while metadata includes details about the hidden rounds.
 
+Heartbeat injection is disabled by default because `response.keep_alive` is a Codex-compatible extension rather than a documented Responses API streaming event. When enabled, the proxy periodically emits this no-op SSE event while a request is being folded. Codex parses the event (resetting its event-level idle timeout) and then safely ignores its unknown Responses event type. Heartbeats intentionally omit `sequence_number`, so they do not disturb the sequence of real response events. This keeps the downstream stream active even while message or function-call deltas are arriving upstream but remain buffered. Enable it under `[stream]` when needed:
+
+```toml
+[stream]
+heartbeat_interval_seconds = 15.0 # seconds; 0 keeps heartbeats disabled
+```
+
+Passthrough requests remain byte-transparent and do not receive locally generated heartbeats.
+
 ## Response metadata
 
 The final reconstructed response includes proxy metadata such as:
@@ -158,6 +168,7 @@ Current offline coverage includes:
 
 - truncation math
 - incremental SSE parsing
+- downstream SSE heartbeat events while folded output is buffered
 - fold/rewrite behavior with captured SSE fixtures
 - commentary and tool-pair continuation payloads
 - header transparency
@@ -187,7 +198,7 @@ config.example.toml # example runtime configuration; copy to config.toml for loc
 
 ## Limitations
 
-- Final answer text is buffered until the terminal round proves it is not truncated, so final-answer first-token latency can be higher than a normal stream.
+- Final answer text is buffered until the terminal round proves it is not truncated, so final-answer first-token latency can be higher than a normal stream. SSE heartbeat events keep the connection active during this delay but do not expose tentative text.
 - Non-streaming requests are currently passed through rather than folded.
 - The truncation detector is intentionally specific to the observed `518 * n - 2` fingerprint.
 - Optional `repair_followup = "stateful"` uses in-memory process-local state; it is not shared across multiple proxy instances.

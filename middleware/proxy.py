@@ -25,7 +25,15 @@ from .codex import (
     tier_n,
 )
 from .config import Config
-from .sse import DONE, incremental_sse, serialize_done, serialize_event
+from .sse import (
+    DONE,
+    HEARTBEAT,
+    incremental_sse,
+    interleave_heartbeats,
+    serialize_done,
+    serialize_event,
+    serialize_heartbeat,
+)
 
 log = logging.getLogger("middleware.proxy")
 
@@ -339,7 +347,16 @@ async def fold_stream(
                 dump_dir.mkdir(parents=True, exist_ok=True)
                 byte_src = _tee(byte_src, dump_dir / f"codex_mw_r{round_no}.sse.txt")
 
-            async for ev in incremental_sse(byte_src):
+            events = interleave_heartbeats(
+                incremental_sse(byte_src), cfg.stream.heartbeat_interval_seconds
+            )
+            async for ev in events:
+                if ev is HEARTBEAT:
+                    # Buffered message/tool deltas produce no Responses events
+                    # downstream. Emit a no-op event so event-level idle timers
+                    # reset; it intentionally consumes no sequence number.
+                    yield serialize_heartbeat()
+                    continue
                 if ev is DONE:
                     saw_done = True
                     continue

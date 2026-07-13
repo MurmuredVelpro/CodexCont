@@ -57,14 +57,19 @@ async def parse_events(data: bytes) -> list:
 
 
 class FakeResp:
-    def __init__(self, data: bytes, status: int = 200, chunk: int = 4096):
+    def __init__(
+        self, data: bytes, status: int = 200, chunk: int = 4096, delay: float = 0
+    ):
         self._data = data
         self.status_code = status
         self.headers: dict[str, str] = {}
         self._chunk = chunk
+        self._delay = delay
 
     async def aiter_bytes(self):
         for i in range(0, len(self._data), self._chunk):
+            if self._delay:
+                await asyncio.sleep(self._delay)
             yield self._data[i : i + self._chunk]
 
     async def aread(self) -> bytes:
@@ -112,6 +117,15 @@ async def run_fold_capture(cfg, base_body, first_resp, client) -> list:
     async for chunk in fold_stream(client, cfg, base_body, {}, first_resp):
         out += chunk
     return await parse_events(out)
+
+
+async def run_fold_raw(cfg, base_body, first_resp, later_resps) -> bytes:
+    """Collect raw downstream bytes, including generated heartbeat events."""
+    client = FakeClient(later_resps)
+    out = b""
+    async for chunk in fold_stream(client, cfg, base_body, {}, first_resp):
+        out += chunk
+    return out
 
 
 # --- test registry ----------------------------------------------------------
@@ -272,6 +286,49 @@ def _round(rs_id, enc, reasoning_tokens_val, *, extra_items=None, msg=None):
                 "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
                           "output_tokens_details": {"reasoning_tokens": reasoning_tokens_val}}}})
     return make_sse(evs)
+
+
+async def test_sse_heartbeat_while_buffering():
+    base = load_config(ROOT / "config.toml")
+    check("heartbeat: disabled by default", base.stream.heartbeat_interval_seconds == 0)
+    cfg = replace(
+        base,
+        stream=replace(base.stream, heartbeat_interval_seconds=0.005),
+    )
+    base_body = {"model": "gpt-5.5", "input": [{"role": "user", "content": "q"}]}
+
+    # The clean final message is tentative and therefore produces no downstream
+    # Responses events until the terminal event. Feed it slowly enough for the
+    # heartbeat timer to fire while fold_stream is buffering it.
+    response = FakeResp(
+        _round("rs_hb", "ENC_HB", 999, msg="buffered" * 100),
+        chunk=128,
+        delay=0.001,
+    )
+    raw = await run_fold_raw(cfg, base_body, response, [])
+    heartbeat_bytes = (
+        b"event: response.keep_alive\n"
+        b'data: {"type":"response.keep_alive"}\n\n'
+    )
+    check("heartbeat: SSE event emitted while output buffered", heartbeat_bytes in raw)
+
+    # The heartbeat is a valid parsed SSE event so Codex's event-level idle timer
+    # resets, but it is an unknown no-op Responses type with no sequence number.
+    parsed = [e for e in await parse_events(raw) if isinstance(e, dict)]
+    heartbeats = [e for e in parsed if e.get("type") == "response.keep_alive"]
+    evs = [e for e in parsed if e.get("type") != "response.keep_alive"]
+    seqs = [e["sequence_number"] for e in evs]
+    check("heartbeat: event is parseable by EventSource clients", bool(heartbeats))
+    check("heartbeat: events consume no sequence number", seqs == list(range(len(evs))))
+
+    disabled = replace(cfg, stream=replace(cfg.stream, heartbeat_interval_seconds=0))
+    raw_disabled = await run_fold_raw(
+        disabled,
+        base_body,
+        FakeResp(_round("rs_no_hb", "ENC", 999, msg="done"), chunk=128, delay=0.001),
+        [],
+    )
+    check("heartbeat: zero interval disables events", heartbeat_bytes not in raw_disabled)
 
 
 async def test_truncated_tool_call_discarded():
@@ -737,6 +794,7 @@ async def _main():
     test_truncation_math()
     await test_sse_framing()
     await test_fold_real_captures()
+    await test_sse_heartbeat_while_buffering()
     await test_truncated_tool_call_discarded()
     await test_commentary_continuation_payload()
     await test_tool_pair_continuation_payload()

@@ -63,6 +63,9 @@ class StreamCfg:
     force_include_encrypted: bool = True
     rechunk_final_answer: bool = True
     rechunk_size: int = 8
+    # SSE heartbeat-event frequency while folding. Prevents downstream idle timeouts
+    # while final message/tool events are buffered. 0 disables keep-alives.
+    heartbeat_interval_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

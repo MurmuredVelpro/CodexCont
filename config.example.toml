@@ -46,6 +46,8 @@ max_total_output_tokens = 0        # optional cumulative cost cap across rounds 
 force_include_encrypted = true     # add reasoning.encrypted_content upstream; always forwarded downstream
 rechunk_final_answer = true        # re-slice the buffered final message into small synthetic deltas
 rechunk_size = 16
+heartbeat_interval_seconds = 0.0  # disabled by default; set e.g. 15.0 to emit a no-op SSE heartbeat event
+                                  # while folding, preventing downstream idle timeouts during buffered output
 
 [log]
 level = "info"

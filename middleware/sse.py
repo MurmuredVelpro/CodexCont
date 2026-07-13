@@ -11,11 +11,14 @@ Malformed JSON data lines are skipped (lenient, matching PoC behavior).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
-# Sentinel for the `data: [DONE]` terminal line (distinct from any dict event).
+# Sentinels for the `data: [DONE]` terminal line and a locally generated
+# downstream heartbeat (both distinct from any dict event).
 DONE = "[DONE]"
+HEARTBEAT = object()
 
 
 def _decode_line(raw: bytes) -> str:
@@ -74,12 +77,74 @@ async def incremental_sse(byte_iter: AsyncIterator[bytes]) -> AsyncIterator[Any]
         yield DONE if ev[0] == "done" else ev[1]
 
 
+async def interleave_heartbeats(
+    events: AsyncIterator[Any], interval_seconds: float
+) -> AsyncIterator[Any]:
+    """Yield HEARTBEAT periodically while preserving the source event stream.
+
+    The timer is independent of upstream activity. This matters when upstream
+    message deltas arrive continuously but the folding proxy buffers them: from
+    the downstream client's perspective the connection would otherwise still
+    be idle. A pending ``__anext__`` is kept alive across timer ticks so a slow
+    upstream read is never cancelled just to send a heartbeat.
+
+    A non-positive interval disables heartbeats.
+    """
+    if interval_seconds <= 0:
+        async for event in events:
+            yield event
+        return
+
+    iterator = events.__aiter__()
+    next_event = asyncio.create_task(anext(iterator))
+    timer = asyncio.create_task(asyncio.sleep(interval_seconds))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                (next_event, timer), return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Handle the timer first if both tasks became ready together, so a
+            # busy upstream cannot indefinitely starve downstream keep-alives.
+            if timer in done:
+                yield HEARTBEAT
+                timer = asyncio.create_task(asyncio.sleep(interval_seconds))
+
+            if next_event in done:
+                try:
+                    event = next_event.result()
+                except StopAsyncIteration:
+                    return
+                yield event
+                next_event = asyncio.create_task(anext(iterator))
+    finally:
+        for task in (next_event, timer):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(next_event, timer, return_exceptions=True)
+
+
 def serialize_event(event: dict[str, Any]) -> bytes:
     """Render one event downstream as `event: <type>\\ndata: <json>\\n\\n`,
     mirroring the upstream framing (both lines present)."""
     etype = event.get("type", "message")
     data = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
     return f"event: {etype}\ndata: {data}\n\n".encode("utf-8")
+
+
+def serialize_heartbeat() -> bytes:
+    """A no-op SSE event that resets event-level downstream idle timers.
+
+    A comment is not sufficient here: Codex applies its idle timeout to parsed
+    SSE events (rather than raw network bytes), and EventSource parsers discard
+    comments before that layer. ``response.keep_alive`` is valid JSON with an
+    unknown Responses event type, so Codex safely ignores it after the SSE event
+    itself has reset the timeout. It intentionally has no sequence number.
+    """
+    return (
+        b"event: response.keep_alive\n"
+        b'data: {"type":"response.keep_alive"}\n\n'
+    )
 
 
 def serialize_done() -> bytes:
