@@ -563,9 +563,10 @@ async def fold_stream(
             for e in msgs[:-1]:
                 if e["item"].get("phase") is None:
                     e["item"]["phase"] = "commentary"
-                    head = e["events"][0].get("item") if e["events"] else None
-                    if isinstance(head, dict):
-                        head["phase"] = "commentary"
+                    for chunk_ev in e["events"]:
+                        chunk_item = chunk_ev.get("item")
+                        if isinstance(chunk_item, dict):
+                            chunk_item["phase"] = "commentary"
             for entry in out_buffer:
                 for chunk in _flush_entry(entry, ds_oi, seq, cfg):
                     yield chunk
