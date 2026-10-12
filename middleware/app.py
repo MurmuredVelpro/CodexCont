@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -367,6 +368,24 @@ async def handle_responses(request: Request) -> Response:
         )
 
     body, legacy_repairs = _repair_legacy_tool_search_arguments(body)
+
+    # Codex 的内部功能（thread_description、ModelVerification 探测等）会绕过
+    # model catalog 直接发裸官方 slug（如 "gpt-6-luna"、"gpt-5.4-mini"），
+    # 上游只认 devin/* 命名，统一改写；点号版本号转连字符（gpt-5.6-luna -> gpt-5-6-luna）。
+    _model = body.get("model")
+    model_rewritten = False
+    if isinstance(_model, str) and "/" not in _model and re.match(r"^(gpt-|swe-|claude-)", _model):
+        _mapped = "devin/" + _model.replace(".", "-")
+        log.info("model rewrite: %s -> %s", _model, _mapped)
+        body["model"] = _mapped
+        model_rewritten = True
+    _tools = body.get("tools") or []
+    _ns = [n.get("namespace") for n in (body.get("additional_tools") or [])]
+    _blob = json.dumps(body, ensure_ascii=False)
+    log.info("tools: model=%s names=%s namespaces=%s keys=%s spawn_agent_refs=%d",
+             body.get("model"),
+             [t.get("name") for t in _tools if isinstance(t, dict)][:60], _ns,
+             sorted(body.keys()), _blob.count("spawn_agent"))
     model_name = body.get("model")
     is_deepseek = isinstance(model_name, str) and "deepseek" in model_name.lower()
     tool_order_repairs = 0
@@ -375,7 +394,7 @@ async def handle_responses(request: Request) -> Response:
     namespace_dedup = _dedupe_tool_namespaces(body) if is_deepseek else 0
 
     forward_raw = decoded_raw
-    if legacy_repairs or tool_order_repairs or namespace_dedup:
+    if model_rewritten or legacy_repairs or tool_order_repairs or namespace_dedup:
         if legacy_repairs:
             log.info("repaired legacy tool_search_call.arguments: count=%d", legacy_repairs)
         if tool_order_repairs:

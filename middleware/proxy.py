@@ -556,6 +556,16 @@ async def fold_stream(
                 return
 
             # Clean finish: flush this round's tentative output as the real answer.
+            # Upstream message items carry no `phase`; the UI groups only
+            # phase="commentary" messages into the collapsible work block, so
+            # mark every flushed message except the last one commentary.
+            msgs = [e for e in out_buffer if e["itype"] == "message"]
+            for e in msgs[:-1]:
+                if e["item"].get("phase") is None:
+                    e["item"]["phase"] = "commentary"
+                    head = e["events"][0].get("item") if e["events"] else None
+                    if isinstance(head, dict):
+                        head["phase"] = "commentary"
             for entry in out_buffer:
                 for chunk in _flush_entry(entry, ds_oi, seq, cfg):
                     yield chunk
