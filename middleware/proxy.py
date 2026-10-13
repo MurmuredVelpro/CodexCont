@@ -585,10 +585,20 @@ async def fold_stream(
                         if "justification" in parsed and "sandbox_permissions" not in parsed:
                             del parsed["justification"]
                             item["arguments"] = json.dumps(parsed, ensure_ascii=False)
+            # Headroom lifts tools into a `functions__` namespace for the
+            # upstream model; the name can leak back in function_call items and
+            # Codex's registry rejects it as "unsupported call". Strip it.
+            def _unlift_functions_ns(item):
+                if (isinstance(item, dict) and item.get("type") == "function_call"
+                        and isinstance(item.get("name"), str)
+                        and item["name"].startswith("functions__")):
+                    item["name"] = item["name"][len("functions__"):]
             for entry in out_buffer:
                 _strip_bare_justification(entry["item"])
+                _unlift_functions_ns(entry["item"])
                 for chunk_ev in entry["events"]:
                     _strip_bare_justification(chunk_ev.get("item"))
+                    _unlift_functions_ns(chunk_ev.get("item"))
             for entry in out_buffer:
                 for chunk in _flush_entry(entry, ds_oi, seq, cfg):
                     yield chunk
