@@ -379,6 +379,31 @@ async def handle_responses(request: Request) -> Response:
         log.info("model rewrite: %s -> %s", _model, _mapped)
         body["model"] = _mapped
         model_rewritten = True
+    # Codex 的线程标题生成固定选用 claude-5-fable（官方目录里的命名档），
+    # 对该用户既贵又常挂；识别标题提示词指纹，改写为便宜的 gpt-6-luna。
+    if b"short title for a task" in decoded_raw:
+        if body.get("model") != "devin/gpt-6-luna":
+            log.info("title model rewrite: %s -> devin/gpt-6-luna", body.get("model"))
+            body["model"] = "devin/gpt-6-luna"
+            model_rewritten = True
+    if isinstance(body.get("model"), str) and "claude" in body["model"]:
+        # Devin's Claude path rejects JSON Schema union keywords (oneOf/anyOf/
+        # allOf) anywhere in tool parameter schemas — strip them (upstream
+        # validator treats them as invalid_argument; harmless to drop since
+        # the object properties alone still describe the parameters).
+        def _strip_union_keywords(o):
+            if isinstance(o, dict):
+                o.pop("oneOf", None)
+                o.pop("anyOf", None)
+                o.pop("allOf", None)
+                for v in o.values():
+                    _strip_union_keywords(v)
+            elif isinstance(o, list):
+                for v in o:
+                    _strip_union_keywords(v)
+
+        _strip_union_keywords(body.get("tools"))
+        _strip_union_keywords(body.get("additional_tools"))
     _tools = body.get("tools") or []
     _ns = [n.get("namespace") for n in (body.get("additional_tools") or [])]
     _blob = json.dumps(body, ensure_ascii=False)
