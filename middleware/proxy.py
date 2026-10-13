@@ -557,10 +557,13 @@ async def fold_stream(
 
             # Clean finish: flush this round's tentative output as the real answer.
             # Upstream message items carry no `phase`; the UI groups only
-            # phase="commentary" messages into the collapsible work block, so
-            # mark every flushed message except the last one commentary.
+            # phase="commentary" messages into the collapsible work block.
+            # A request whose output includes tool calls is mid-turn work, so
+            # every message in it is commentary; only in a tool-call-free
+            # request does the last message stay phase-less as the final answer.
+            has_tool_calls = any(e["itype"] != "message" for e in out_buffer)
             msgs = [e for e in out_buffer if e["itype"] == "message"]
-            for e in msgs[:-1]:
+            for e in (msgs if has_tool_calls else msgs[:-1]):
                 if e["item"].get("phase") is None:
                     e["item"]["phase"] = "commentary"
                     for chunk_ev in e["events"]:
