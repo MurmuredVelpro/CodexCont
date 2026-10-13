@@ -570,6 +570,25 @@ async def fold_stream(
                         chunk_item = chunk_ev.get("item")
                         if isinstance(chunk_item, dict):
                             chunk_item["phase"] = "commentary"
+            # Claude-family models emit exec_command with a bare `justification`
+            # argument; Codex rejects it unless sandbox_permissions is set, so
+            # drop the field before the client sees the call.
+            def _strip_bare_justification(item):
+                if (isinstance(item, dict) and item.get("type") == "function_call"
+                        and item.get("name") == "exec_command"):
+                    args = item.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            parsed = json.loads(args)
+                        except json.JSONDecodeError:
+                            return
+                        if "justification" in parsed and "sandbox_permissions" not in parsed:
+                            del parsed["justification"]
+                            item["arguments"] = json.dumps(parsed, ensure_ascii=False)
+            for entry in out_buffer:
+                _strip_bare_justification(entry["item"])
+                for chunk_ev in entry["events"]:
+                    _strip_bare_justification(chunk_ev.get("item"))
             for entry in out_buffer:
                 for chunk in _flush_entry(entry, ds_oi, seq, cfg):
                     yield chunk
