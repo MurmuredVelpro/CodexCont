@@ -380,11 +380,11 @@ async def handle_responses(request: Request) -> Response:
         body["model"] = _mapped
         model_rewritten = True
     # Codex 的线程标题生成固定选用 claude-5-fable（官方目录里的命名档），
-    # 对该用户既贵又常挂；识别标题提示词指纹，改写为便宜的 gpt-6-luna。
+    # 对该用户既贵又常挂；识别标题提示词指纹，改写为便宜的 claude-haiku-5-5。
     if b"short title for a task" in decoded_raw:
-        if body.get("model") != "devin/gpt-6-luna":
-            log.info("title model rewrite: %s -> devin/gpt-6-luna", body.get("model"))
-            body["model"] = "devin/gpt-6-luna"
+        if body.get("model") != "devin/claude-haiku-5-5":
+            log.info("title model rewrite: %s -> devin/claude-haiku-5-5", body.get("model"))
+            body["model"] = "devin/claude-haiku-5-5"
             model_rewritten = True
     if isinstance(body.get("model"), str) and "claude" in body["model"]:
         # Devin's Claude path rejects JSON Schema union keywords (oneOf/anyOf/
